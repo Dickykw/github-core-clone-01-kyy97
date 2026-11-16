@@ -116,38 +116,20 @@ export function applyDelta(base: Buffer, delta: Buffer): Buffer {
 
 /**
  * Inflate exactly one deflate stream starting at `start`, whose inflated
- * length is `expectedSize`. Node's inflateSync ignores trailing bytes and
- * throws on truncation, so the predicate "inflates to expectedSize" is
- * monotonic in the slice end — find the smallest such end by exponential
- * probe + binary search. Returns the bytes and how many input bytes the
- * stream consumed.
+ * length is `expectedSize`. Node's inflateSync with `{ info: true }`
+ * returns the engine, whose `bytesWritten` is exactly the number of input
+ * bytes the stream consumed (verified: it stops at the stream end even
+ * with trailing garbage after it, and still throws on truncation). So one
+ * inflate call gives both the bytes and the consumed length — no
+ * exponential probe + binary search, and no throw per probe.
  */
 function inflateBounded(buf: Buffer, start: number, expectedSize: number, limit: number): { bytes: Buffer; consumed: number } {
-  const tryAt = (end: number): Buffer | null => {
-    try {
-      const out = zlibInflate(buf.subarray(start, end));
-      return out.length === expectedSize ? out : null;
-    } catch {
-      return null;
-    }
+  const { buffer, engine } = zlibInflate(buf.subarray(start, limit), { info: true }) as unknown as {
+    buffer: Buffer;
+    engine: { bytesWritten: number };
   };
-  let lo = start;
-  let hi = Math.min(limit, start + Math.max(16, expectedSize + 64));
-  let found = tryAt(hi);
-  while (!found && hi < limit) {
-    lo = hi;
-    hi = Math.min(limit, start + (hi - start) * 2 + 16);
-    found = tryAt(hi);
-  }
-  if (!found) throw new Error('deflate stream not found before pack end');
-  // Binary search the smallest end in (lo, hi] that inflates fully.
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if (tryAt(mid)) hi = mid;
-    else lo = mid;
-  }
-  const bytes = tryAt(hi)!;
-  return { bytes, consumed: hi - start };
+  if (buffer.length !== expectedSize) throw new Error('deflate stream size mismatch');
+  return { bytes: buffer, consumed: engine.bytesWritten };
 }
 
 export interface ParsedPack {

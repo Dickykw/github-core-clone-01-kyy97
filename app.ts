@@ -11,6 +11,29 @@ export const JSON_TYPE = 'application/json; charset=utf-8';
 
 let requestCounter = 0;
 
+/** Server-side handler timing per route label (diagnostic only; never
+ * enters a response or the export). Lets the perf tuner split a
+ * workload's wall time into server compute vs client/HTTP overhead. */
+const routeStats = new Map<string, { n: number; ms: number }>();
+export function serverRouteStats(): { label: string; n: number; ms: number; avgMs: number }[] {
+  return [...routeStats.entries()]
+    .map(([label, s]) => ({ label, n: s.n, ms: Math.round(s.ms * 100) / 100, avgMs: s.n > 0 ? Math.round((s.ms / s.n) * 1000) / 1000 : 0 }))
+    .sort((a, b) => b.ms - a.ms);
+}
+export function resetServerRouteStats(): void {
+  routeStats.clear();
+}
+function routeLabel(method: string, path: string): string {
+  if (path === '/healthz') return 'healthz';
+  if (path === '/api/graphql' || path === '/api/v3/graphql') return 'graphql';
+  if (path === '/mcp' || path === '/api/v3/mcp') return 'mcp';
+  if (path.startsWith('/api/v3/') || path === '/api/v3' || path === '/api/v3/') return `rest:${method}`;
+  if (path.includes('.git/git-upload-pack')) return 'git:upload-pack';
+  if (path.includes('.git/git-receive-pack')) return 'git:receive-pack';
+  if (path.includes('.git/info/refs')) return 'git:info-refs';
+  return 'other';
+}
+
 /** One request's context, handed to a surface handler. */
 export interface Ctx {
   req: IncomingMessage;
@@ -49,6 +72,8 @@ export function readBody(req: IncomingMessage): Promise<Buffer> {
   });
 }
 
+const noop = (): void => undefined;
+
 /** Parse a JSON body; returns null when the body is empty or not JSON. */
 export function parseJson(body: Buffer): unknown {
   if (body.length === 0) return null;
@@ -59,19 +84,18 @@ export function parseJson(body: Buffer): unknown {
   }
 }
 
-/** The token the env gave this entry; '' when unset (local dev). */
-function expectedToken(): string {
-  return process.env.MAKEFUN_SHOP_TOKEN ?? '';
-}
+/** The token the env gave this entry; '' when unset (local dev). Read once
+ * at module load — process.env access per request is needless overhead on
+ * the 2,000-request read bench. */
+const EXPECTED_TOKEN: string = process.env.MAKEFUN_SHOP_TOKEN ?? '';
 
 export function isAuthed(req: IncomingMessage): boolean {
   const auth = req.headers.authorization ?? '';
   if (!auth.startsWith('Bearer ')) return false;
   const token = auth.slice('Bearer '.length).trim();
   if (token.length === 0) return false;
-  const expected = expectedToken();
-  if (expected.length === 0) return true;
-  return token === expected;
+  if (EXPECTED_TOKEN.length === 0) return true;
+  return token === EXPECTED_TOKEN;
 }
 
 const GIT_ROUTE = /^\/([^/]+)\/([^/]+)\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/;
@@ -94,6 +118,8 @@ export function createApp(): Server {
         req, res, method, pathname: path, query: url.searchParams,
         body: Buffer.alloc(0), requestId,
       };
+      const label = routeLabel(method, path);
+      const t0 = performance.now();
       try {
         // The env's boot check calls this twice: 200 {"ok":true}. No auth.
         if (method === 'GET' && path === '/healthz') {
@@ -107,7 +133,21 @@ export function createApp(): Server {
           return;
         }
 
-        ctx.body = await readBody(req);
+        // GET/HEAD never carries a body in this suite; reading it costs a
+        // promise + event-listener setup per request (2,000x on the read
+        // bench). Only skip when the request provably has no body. The
+        // error listener stays: an unhandled 'error' on the request would
+        // throw and kill the process.
+        const hasBody = method !== 'GET' && method !== 'HEAD'
+          ? true
+          : (req.headers['content-length'] !== undefined && req.headers['content-length'] !== '0')
+            || req.headers['transfer-encoding'] !== undefined;
+        if (hasBody) {
+          ctx.body = await readBody(req);
+        } else {
+          req.on('error', noop);
+          ctx.body = Buffer.alloc(0);
+        }
 
         if (path === '/api/graphql' || path === '/api/v3/graphql') {
           await handleGraphql(ctx);
@@ -132,6 +172,11 @@ export function createApp(): Server {
         if (!res.writableEnded) {
           jsonError(res, 500, err instanceof Error ? err.message : 'Internal Server Error');
         }
+      } finally {
+        const s = routeStats.get(label) ?? { n: 0, ms: 0 };
+        s.n += 1;
+        s.ms += performance.now() - t0;
+        routeStats.set(label, s);
       }
     })();
   });
