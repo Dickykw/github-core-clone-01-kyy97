@@ -145,7 +145,10 @@ export function handleReceivePack(repo: Repo, body: Buffer): Buffer {
         continue;
       }
     }
-    repo.refs.set(u.ref, tip);
+    // Store the exact oid the client sent: a tag ref points at the tag
+    // object, not at the commit it peels to — peeling here made a later
+    // delete (oldOid = tag oid) fail with "old value mismatch".
+    repo.refs.set(u.ref, u.newOid);
     results.push({ ref: u.ref, ok: true });
   }
   if (!reportStatus) return Buffer.concat([FLUSH_PKT]);

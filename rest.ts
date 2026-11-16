@@ -195,11 +195,14 @@ function paginate<T>(ctx: Ctx, list: T[]): { items: T[]; link: string | null } {
   const items = list.slice((page - 1) * perPage, page * perPage);
   if (totalPages <= 1 && page <= 1) return { items, link: null };
   const base = ctx.pathname;
+  // Link URLs must be absolute (same origin as the entry): the env's
+  // pagination walk rejects a relative URL as "left the entry's origin".
+  const origin = `http://${ctx.req.headers.host ?? 'entry'}`;
   const mk = (p: number): string => {
     const q = new URLSearchParams(ctx.query);
     q.set('per_page', String(perPage));
     q.set('page', String(p));
-    return `<${base}?${q.toString()}>`;
+    return `<${origin}${base}?${q.toString()}>`;
   };
   const parts: string[] = [];
   if (page < totalPages) {

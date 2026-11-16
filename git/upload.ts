@@ -46,6 +46,7 @@ interface FetchArgs {
   deepen?: number;
   sidebandAll: boolean;
   ofsDelta: boolean;
+  includeTag: boolean;
 }
 
 /** Parse a v2 command request body into {command, args}. */
@@ -70,7 +71,7 @@ function parseCommand(body: Buffer): { command: string; args: string[] } {
 }
 
 function parseFetchArgs(args: string[]): FetchArgs {
-  const out: FetchArgs = { wants: [], haves: [], sidebandAll: false, ofsDelta: false };
+  const out: FetchArgs = { wants: [], haves: [], sidebandAll: false, ofsDelta: false, includeTag: false };
   for (const arg of args) {
     if (arg.startsWith('want ')) out.wants.push(arg.slice(5).trim());
     else if (arg.startsWith('have ')) out.haves.push(arg.slice(5).trim());
@@ -79,6 +80,7 @@ function parseFetchArgs(args: string[]): FetchArgs {
     else if (arg.startsWith('deepen-since ')) out.deepen = 1;
     else if (arg === 'sideband-all') out.sidebandAll = true;
     else if (arg === 'ofs-delta') out.ofsDelta = true;
+    else if (arg === 'include-tag') out.includeTag = true;
   }
   return out;
 }
@@ -87,9 +89,11 @@ function parseFetchArgs(args: string[]): FetchArgs {
 function lsRefsLines(repo: Repo, args: string[]): string[] {
   const prefixes: string[] = [];
   let refLimit = 0;
+  let peel = false;
   for (const arg of args) {
     if (arg.startsWith('ref-prefix ')) prefixes.push(arg.slice('ref-prefix '.length));
     else if (arg.startsWith('ref-limit ')) refLimit = Number(arg.slice('ref-limit '.length)) || 0;
+    else if (arg === 'peel') peel = true;
   }
   const matches = (name: string): boolean => prefixes.length === 0 || prefixes.some((p) => name.startsWith(p));
   const lines: string[] = [];
@@ -105,7 +109,16 @@ function lsRefsLines(repo: Repo, args: string[]): string[] {
   const refs = [...repo.refs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
   for (const [ref, oid] of refs) {
     if (!matches(ref)) continue;
-    lines.push(`${oid} ${ref}\n`);
+    // With `peel`, an annotated tag ref carries the commit it peels to.
+    let line = `${oid} ${ref}\n`;
+    if (peel) {
+      const obj = repo.objects.get(oid);
+      if (obj && obj.type === 'tag') {
+        const target = parseTagTarget(obj.bytes);
+        if (target) line = `${oid} ${ref}\0peeled:${target}\n`;
+      }
+    }
+    lines.push(line);
     if (refLimit > 0 && lines.length >= refLimit) break;
   }
   return lines;
@@ -131,6 +144,23 @@ function handleFetch(repo: Repo, args: string[]): Buffer {
     }
   }
   const { objects, boundary } = collectReachable(repo, wants, fetch.deepen);
+  // With haves and no deepen, send only what the client does not already
+  // hold: subtract everything reachable from the haves. (With deepen the
+  // depth limit dominates — the shallow/deepen checks expect the next
+  // generation even though it is reachable from the shallow have.)
+  if (fetch.haves.length > 0 && fetch.deepen === undefined) {
+    const held = collectReachable(repo, fetch.haves).objects;
+    for (const oid of held.keys()) objects.delete(oid);
+  }
+  // With `include-tag`, also send tag objects whose target is in the pack
+  // (an annotated tag pointing at a wanted commit round-trips in a clone).
+  if (fetch.includeTag) {
+    for (const [oid, obj] of repo.objects) {
+      if (obj.type !== 'tag' || objects.has(oid)) continue;
+      const target = parseTagTarget(obj.bytes);
+      if (target && objects.has(target)) objects.set(oid, { type: obj.type, bytes: obj.bytes });
+    }
+  }
   // Acknowledgment section, only when the client offered haves. Sections are
   // separated by DELIM (0001), not flush: a flush here ends the whole
   // response in the client's eyes and the packfile after it is "unexpected".

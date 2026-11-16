@@ -87,6 +87,7 @@ export function createApp(): Server {
     void (async () => {
       const requestId = `req-${++requestCounter}`;
       res.setHeader('x-request-id', requestId);
+      res.setHeader('x-github-request-id', requestId);
       const method = req.method ?? 'GET';
       const path = pathOf(req);
       let url: URL;
@@ -114,11 +115,11 @@ export function createApp(): Server {
 
         ctx.body = await readBody(req);
 
-        if (path === '/api/v3/graphql') {
+        if (path === '/api/graphql' || path === '/api/v3/graphql') {
           await handleGraphql(ctx);
           return;
         }
-        if (path === '/api/v3/mcp') {
+        if (path === '/mcp' || path === '/api/v3/mcp') {
           await handleMcp(ctx);
           return;
         }
