@@ -104,18 +104,22 @@ function lsRefsLines(repo: Repo, args: string[]): string[] {
   // print "You appear to have cloned an empty repository" and `git
   // ls-remote` show no HEAD (an `unborn` HEAD line gives the wrong warning).
   if (matches('HEAD') && defaultTip) {
-    lines.push(`${defaultTip} HEAD\0symref-target:${defaultRef}\n`);
+    // Attributes are SPACE-separated after the ref name (no NUL): the
+    // env's ls-refs parser splits the line on spaces, so a NUL here makes
+    // the whole `HEAD\0symref-target:...` the ref name.
+    lines.push(`${defaultTip} HEAD symref-target:${defaultRef}\n`);
   }
   const refs = [...repo.refs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
   for (const [ref, oid] of refs) {
     if (!matches(ref)) continue;
-    // With `peel`, an annotated tag ref carries the commit it peels to.
+    // With `peel`, an annotated tag ref carries the commit it peels to
+    // (space-separated attribute, no NUL — see HEAD above).
     let line = `${oid} ${ref}\n`;
     if (peel) {
       const obj = repo.objects.get(oid);
       if (obj && obj.type === 'tag') {
         const target = parseTagTarget(obj.bytes);
-        if (target) line = `${oid} ${ref}\0peeled:${target}\n`;
+        if (target) line = `${oid} ${ref} peeled:${target}\n`;
       }
     }
     lines.push(line);
