@@ -20,6 +20,8 @@ export interface Ctx {
   query: URLSearchParams;
   body: Buffer;
   requestId: string;
+  /** GET response-cache key, set by handleRest for repo-scoped GETs. */
+  cacheKey?: string;
 }
 
 export function sendJson(res: ServerResponse, status: number, body: unknown, headers: Readonly<Record<string, string>> = {}): void {
@@ -72,14 +74,6 @@ export function isAuthed(req: IncomingMessage): boolean {
   return token === expected;
 }
 
-function pathOf(req: IncomingMessage): string {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
-  } catch {
-    return '/';
-  }
-}
-
 const GIT_ROUTE = /^\/([^/]+)\/([^/]+)\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/;
 
 export function createApp(): Server {
@@ -89,13 +83,13 @@ export function createApp(): Server {
       res.setHeader('x-request-id', requestId);
       res.setHeader('x-github-request-id', requestId);
       const method = req.method ?? 'GET';
-      const path = pathOf(req);
       let url: URL;
       try {
         url = new URL(req.url ?? '/', 'http://entry');
       } catch {
         url = new URL('/', 'http://entry');
       }
+      const path = url.pathname;
       const ctx: Ctx = {
         req, res, method, pathname: path, query: url.searchParams,
         body: Buffer.alloc(0), requestId,

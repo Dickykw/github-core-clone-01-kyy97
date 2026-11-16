@@ -104,7 +104,7 @@ export function handleReceivePack(repo: Repo, body: Buffer): Buffer {
         const obj = repo.objects.get(oid);
         return obj ? { type: obj.type, bytes: obj.bytes } : undefined;
       });
-      for (const [oid, obj] of parsed.objects) store.putObject(repo, obj.type, obj.bytes);
+      for (const [oid, obj] of parsed.objects) store.putObjectByOid(repo, oid, obj.type, obj.bytes);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'pack parse failed';
       const out: Buffer[] = [line(`unpack ${msg}`)];
@@ -151,6 +151,8 @@ export function handleReceivePack(repo: Repo, body: Buffer): Buffer {
     repo.refs.set(u.ref, u.newOid);
     results.push({ ref: u.ref, ok: true });
   }
+  // Any ref change invalidates the git caches (keyed on repo.version).
+  if (results.length > 0) repo.version += 1;
   if (!reportStatus) return Buffer.concat([FLUSH_PKT]);
   if (caps.has('report-status-v2')) {
     // v2: the status lines are themselves pkt-lines, packed inside sideband

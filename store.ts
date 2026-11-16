@@ -76,6 +76,8 @@ export interface Repo {
   private: boolean;
   defaultBranch: string;
   seq: number;
+  /** Bumped on every git-object or ref change; the git pack/ls-refs caches key on it. */
+  version: number;
   refs: Map<string, string>;
   objects: Map<string, GitObject>;
   issues: Map<number, Issue>;
@@ -150,7 +152,7 @@ export class Store {
     const repo: Repo = {
       id: this.nextId(), owner, name, fullName: key,
       description: description ?? '', private: isPrivate ?? false, defaultBranch: 'main',
-      seq: this.repoSeq++, refs: new Map(), objects: new Map(),
+      seq: this.repoSeq++, version: 0, refs: new Map(), objects: new Map(),
       issues: new Map(), issueCounter: 0, labels: new Set(),
       pulls: new Map(), prCounter: 0, comments: new Map(), commentCounter: 0,
       commitCounter: 0, treeFilesCache: new Map(),
@@ -181,8 +183,19 @@ export class Store {
       const obj: GitObject = { type, bytes };
       if (type === 'commit') obj.commit = parseCommit(bytes);
       repo.objects.set(oid, obj);
+      repo.version += 1;
     }
     return oid;
+  }
+
+  /** Store an object whose oid is already known (e.g. from parsePack, which
+   * verified the SHA-1): skips the re-hash. */
+  putObjectByOid(repo: Repo, oid: string, type: ObjectType, bytes: Buffer): void {
+    if (repo.objects.has(oid)) return;
+    const obj: GitObject = { type, bytes };
+    if (type === 'commit') obj.commit = parseCommit(bytes);
+    repo.objects.set(oid, obj);
+    repo.version += 1;
   }
 
   getObject(repo: Repo, oid: string): GitObject | undefined {

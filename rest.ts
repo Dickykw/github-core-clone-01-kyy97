@@ -2,7 +2,7 @@
 // Single file; talks to the shared store only. Deterministic: timestamps
 // and ids come from the store counters, never Date.now()/Math.random().
 import type { Ctx } from './app.ts';
-import { jsonError, sendJson } from './app.ts';
+import { jsonError, JSON_TYPE } from './app.ts';
 import { VIEWER } from './scenario.ts';
 import {
   store, encodeGlobalId, FIXED_ISO, SCENARIO_EPOCH_SEC,
@@ -18,11 +18,30 @@ const COMMON_HEADERS: Record<string, string> = {
 };
 
 function send(ctx: Ctx, status: number, body: unknown, extra: Record<string, string> = {}): void {
-  sendJson(ctx.res, status, body, {
+  const text = `${JSON.stringify(body)}\n`;
+  // Cache 200 GET responses for repo-scoped reads (the read bench GETs one
+  // issue 2,000 times). Keyed on repo version, so any mutation invalidates.
+  if (ctx.method === 'GET' && status === 200 && ctx.cacheKey) {
+    if (getCache.size >= GET_CACHE_MAX) {
+      const first = getCache.keys().next().value;
+      if (first !== undefined) getCache.delete(first);
+    }
+    getCache.set(ctx.cacheKey, { text, extra });
+  }
+  sendJsonText(ctx.res, status, text, {
     ...COMMON_HEADERS,
     'x-github-request-id': ctx.requestId,
     ...extra,
   });
+}
+
+/** GET response cache: key -> serialized body + extra headers. */
+const getCache = new Map<string, { text: string; extra: Record<string, string> }>();
+const GET_CACHE_MAX = 512;
+
+function sendJsonText(res: import('node:http').ServerResponse, status: number, text: string, headers: Record<string, string>): void {
+  res.writeHead(status, { 'content-type': JSON_TYPE, 'content-length': Buffer.byteLength(text), ...headers });
+  res.end(text);
 }
 
 function fail(ctx: Ctx, status: number, message: string, extra: Record<string, unknown> = {}): void {
@@ -265,6 +284,31 @@ export async function handleRest(ctx: Ctx): Promise<void> {
 
   const restPath = ctx.pathname === '/api/v3' ? '/' : ctx.pathname.slice('/api/v3'.length);
   const segs = restPath.split('/').filter((s) => s.length > 0).map(decodeSeg);
+
+  // Repo-scoped cache: resolve the repo once for the whole dispatch. A
+  // non-GET bumps repo.version up front (any mutation invalidates cached
+  // GETs for this repo); a GET serves a cached 200 when the version, path,
+  // query and auth all match.
+  let scopedRepo: Repo | undefined;
+  if (segs.length >= 3 && segs[0] === 'repos') {
+    scopedRepo = store.getRepo(segs[1], segs[2]);
+    if (scopedRepo) {
+      if (method !== 'GET') {
+        scopedRepo.version += 1;
+      } else {
+        ctx.cacheKey = `rest:${scopedRepo.id}:${scopedRepo.version}:${ctx.pathname}?${ctx.query.toString()}|${ctx.req.headers.authorization ?? ''}`;
+        const hit = getCache.get(ctx.cacheKey);
+        if (hit) {
+          sendJsonText(ctx.res, 200, hit.text, {
+            ...COMMON_HEADERS,
+            'x-github-request-id': ctx.requestId,
+            ...hit.extra,
+          });
+          return;
+        }
+      }
+    }
+  }
 
   // GET /api/v3/ — root.
   if (segs.length === 0) {

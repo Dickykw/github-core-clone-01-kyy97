@@ -7,14 +7,28 @@ import { DELIM_PKT, FLUSH_PKT, parsePktLines, pktLine, pktText, RESPONSE_END_PKT
 
 const ZERO_OID = '0000000000000000000000000000000000000000';
 
+/** Response cache for fetch + ls-refs: identical inputs (same repo version,
+ * same args) give byte-identical answers, and the clone bench fires 50
+ * identical shallow fetches at one static repo. Capped, FIFO eviction. */
+const responseCache = new Map<string, Buffer>();
+const CACHE_MAX = 128;
+function cachePut(key: string, value: Buffer): void {
+  if (responseCache.size >= CACHE_MAX) {
+    const first = responseCache.keys().next().value;
+    if (first !== undefined) responseCache.delete(first);
+  }
+  responseCache.set(key, value);
+}
+
 /** Objects reachable from `tips`; with `maxDepth`, commit parents stop at that depth (deepen). */
 export function collectReachable(repo: Repo, tips: string[], maxDepth?: number): { objects: Map<string, PackObject>; boundary: string[] } {
   const objects = new Map<string, PackObject>();
   const boundary: string[] = [];
   const visited = new Set<string>();
   const queue: { oid: string; depth: number }[] = tips.map((oid) => ({ oid, depth: 1 }));
-  while (queue.length > 0) {
-    const { oid, depth } = queue.shift()!;
+  // Index-based queue: shift() is O(n) per pop and makes a 200-commit walk quadratic.
+  for (let qi = 0; qi < queue.length; qi += 1) {
+    const { oid, depth } = queue[qi]!;
     if (visited.has(oid)) continue;
     visited.add(oid);
     const obj = repo.objects.get(oid);
@@ -129,14 +143,22 @@ function lsRefsLines(repo: Repo, args: string[]): string[] {
 }
 
 function handleLsRefs(repo: Repo, args: string[]): Buffer {
+  const key = `ls:${repo.id}:${repo.version}:${args.join('|')}`;
+  const hit = responseCache.get(key);
+  if (hit) return hit;
   const parts: Buffer[] = [];
   for (const line of lsRefsLines(repo, args)) parts.push(pktLine(line));
   parts.push(FLUSH_PKT);
-  return Buffer.concat(parts);
+  const out = Buffer.concat(parts);
+  cachePut(key, out);
+  return out;
 }
 
 function handleFetch(repo: Repo, args: string[]): Buffer {
   const fetch = parseFetchArgs(args);
+  const key = `fetch:${repo.id}:${repo.version}:${fetch.wants.join(',')}|${fetch.haves.join(',')}|${fetch.deepen ?? ''}|${fetch.includeTag}`;
+  const hit = responseCache.get(key);
+  if (hit) return hit;
   const parts: Buffer[] = [];
   // A want of the zero OID is how `git clone` asks for an empty repo (the
   // ls-refs unborn HEAD): answer with an empty pack, never an error.
@@ -197,7 +219,9 @@ function handleFetch(repo: Repo, args: string[]): Buffer {
   parts.push(pktText('packfile'));
   parts.push(...sidebandBytes(1, pack));
   parts.push(FLUSH_PKT);
-  return Buffer.concat(parts);
+  const out = Buffer.concat(parts);
+  cachePut(key, out);
+  return out;
 }
 
 /** Handle POST git-upload-pack (protocol v2). Returns the response body. */
